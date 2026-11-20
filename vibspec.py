@@ -587,7 +587,7 @@ def main():
     ap.add_argument('--names', default='board_x,board_y,board_z', help='names of the triaxial channels')
     ap.add_argument('--sensitivity', type=float, default=0.1, help='triaxial sensitivity, V/g (0.1 = 100 mV/g)')
     ap.add_argument('--extra', default='3', help='WebDAQ channel of the single-axis accelerometer ("none" to disable)')
-    ap.add_argument('--extra-name', default='bench_z', help='name of the single-axis channel')
+    ap.add_argument('--extra-name', default='chiller', help='name of the single-axis channel')
     ap.add_argument('--extra-sensitivity', type=float, default=0.1, help='single-axis sensitivity, V/g')
     ap.add_argument('--vertical', default='z', choices=list(AXES), help='sensor axis pointing up')
     ap.add_argument('--port', type=int, default=8080)

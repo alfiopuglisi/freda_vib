@@ -2,7 +2,7 @@
 
 Vibration spectrum analyser for a PC connected to an MCC **WebDAQ-504** with a triaxial IEPE accelerometer
 (default `192.168.34.61`, channels 0/1/2 = x/y/z) and a single-axis IEPE accelerometer (channel 3,
-`bench_z`), all 100 mV/g. It is a port of
+`chiller`), all 100 mV/g. It is a port of
 [vibspec](https://github.com/alfiopuglisi/vibspec) (an Android app that does the same with the phone's
 accelerometer) and has the same web page, analysis and HTTP API.
 
@@ -32,8 +32,8 @@ Needs Python 3.8+ with numpy, requests and matplotlib (Anaconda has them).
 - **Peaks** (up to 5, above 10× the median noise power): interpolated frequency, amplitude per axis, total,
   and the **3-D vibration direction** (principal axis of the band-limited covariance) with azimuth/elevation,
   angle from vertical and linearity (1 = straight line, 0.5 = planar, 0.33 = isotropic).
-- **Single-axis channel** (`bench_z`): its spectrum is drawn as an extra line, with its band RMS and its
-  amplitude at each peak; it is not used for the 3-D direction. The **bench_z** checkbox in Settings turns it
+- **Single-axis channel** (`chiller`): its spectrum is drawn as an extra line, with its band RMS and its
+  amplitude at each peak; it is not used for the 3-D direction. The **chiller** checkbox in Settings turns it
   off/on: unticked, channel 3 is removed from the WebDAQ job (the acquisition restarts, a few seconds are
   lost). The choice is remembered.
 - **Download raw data (CSV)**: the time samples (m/s², all channels) of the window the spectrum on screen
