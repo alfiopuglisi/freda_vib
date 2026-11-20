@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VibSpec WebDAQ</title>
+<style>
+  :root { --bg:#121417; --panel:#1b1f24; --fg:#e6e6e6; --muted:#9aa0a6; --grid:#2e3338; --accent:#ffb300; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px system-ui, sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; padding:10px 16px; background:var(--panel); position:sticky; top:0; z-index:2; }
+  header h1 { font-size:16px; margin:0; color:var(--accent); }
+  #status { color:var(--muted); font-variant-numeric:tabular-nums; }
+  #status b.live { color:#66bb6a; } #status b.held { color:#ffb300; } #status b.stopped { color:#ef5350; }
+  main { display:grid; grid-template-columns: minmax(0,2fr) minmax(280px,1fr); gap:12px; padding:12px 16px; }
+  @media (max-width: 900px) { main { grid-template-columns: minmax(0,1fr); } }
+  .card { background:var(--panel); border-radius:8px; padding:10px; min-width:0; }
+  canvas { width:100%; display:block; touch-action:none; }
+  #spec { height:min(55vh, 520px); }
+  #vec { height:340px; cursor:grab; }
+  button { background:#2b3138; color:var(--fg); border:1px solid #3a4148; border-radius:6px; padding:7px 12px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#111; border-color:var(--accent); font-weight:600; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:6px 0; }
+  label { color:var(--muted); display:flex; gap:6px; align-items:center; }
+  input, select { background:#11151a; color:var(--fg); border:1px solid #3a4148; border-radius:5px; padding:5px 6px; font:inherit; width:6.5em; }
+  table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; font-size:13px; }
+  th, td { text-align:right; padding:3px 6px; border-bottom:1px solid var(--grid); }
+  th:first-child, td:first-child { text-align:left; }
+  a { color:#64b5f6; }
+  .snap { padding:6px 0; border-bottom:1px solid var(--grid); }
+  .snap a { margin-right:10px; }
+  .muted { color:var(--muted); font-size:12px; }
+  h2 { font-size:14px; margin:4px 0 8px; color:var(--muted); font-weight:600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>VibSpec · WebDAQ</h1>
+  <button id="run" class="primary">Start</button>
+  <button id="hold">Hold</button>
+  <button id="snap">Snapshot</button>
+  <label>delay <input id="delay" type="number" min="0" max="600" step="1"> s</label>
+  <button id="cancel" hidden>Cancel snapshot</button>
+  <span id="status">connecting…</span>
+</header>
+<main>
+  <div>
+    <div class="card"><canvas id="spec"></canvas></div>
+    <div class="card" style="margin-top:12px">
+      <h2>Settings</h2>
+      <div class="row">
+        <label>Averaging <input id="avg" type="number" min="0.1" max="10" step="0.1"> s</label>
+        <label>Resolution <input id="res" type="number" min="0" max="20" step="0.05"> Hz <span class="muted">(0 = auto)</span></label>
+        <label>Range <input id="fmin" type="number" min="0" step="0.5"> – <input id="fmax" type="number" min="1" step="1"> Hz</label>
+      </div>
+      <div class="row">
+        <label>Unit <select id="unit"></select></label>
+        <label>Y scale <select id="log"><option value="1">log</option><option value="0">linear</option></select></label>
+        <label>Peaks <input id="peaks" type="number" min="1" max="5" step="1"></label>
+        <label>Sample rate <select id="rate"></select> Hz</label>
+        <button id="apply" class="primary">Apply</button>
+        <button id="savepng">Download this view (PNG)</button>
+      </div>
+      <div class="muted" id="info"></div>
+    </div>
+  </div>
+  <div>
+    <div class="card"><h2>Vibration direction (drag to rotate)</h2><canvas id="vec"></canvas></div>
+    <div class="card" style="margin-top:12px"><h2>Peaks</h2><div id="peaks-table"></div></div>
+    <div class="card" style="margin-top:12px"><h2>Snapshots <span class="muted" id="snapdir"></span></h2><div id="snaps" class="muted">–</div></div>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const AX = ['#e53935', '#43a047', '#1e88e5'], TOT = '#ffffff';
+const PK = ['#fb8c00', '#8e24aa', '#00897b', '#6d4c41', '#d81b60'];
+let data = null, st = null, seq = -1, yaw = -35, pitch = 25, formLoaded = false, lastSnap = null;
+
+async function api(path) {
+  const r = await fetch(path, { cache: 'no-store' });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+function setupCanvas(c) {
+  const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); return [g, w, h];
+}
+function fmt(v) {
+  if (v === 0) return '0';
+  const a = Math.abs(v);
+  if (a >= 1000 || a < 0.01) return v.toExponential(0);
+  if (a >= 10) return v.toFixed(0);
+  if (a >= 1) return v.toFixed(1);
+  return v.toPrecision(2);
+}
+function niceStep(range, n) {
+  const raw = range / n, mag = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / mag;
+  return mag * (m < 1.5 ? 1 : m < 3 ? 2 : m < 7 ? 5 : 10);
+}
+
+function drawSpec() {
+  const [g, w, h] = setupCanvas($('spec'));
+  g.fillStyle = '#1b1f24'; g.fillRect(0, 0, w, h);
+  g.font = '12px system-ui'; g.fillStyle = '#e6e6e6';
+  if (!data || !data.f) { g.textAlign = 'center'; g.fillText('Waiting for data…', w / 2, h / 2); return; }
+  const L = 56, R = w - 12, T = 26, B = h - 28;
+  const f = data.f, fmin = data.fmin, fmax = data.fmax;
+  const xOf = v => L + (v - fmin) / (fmax - fmin) * (R - L);
+  const vmax = Math.max(1e-12, ...data.t.filter(v => v != null));
+  let lo, hi;
+  if (data.log) { hi = Math.pow(10, Math.ceil(Math.log10(vmax * 1.2))); lo = hi / 1e4; } else { lo = 0; hi = vmax * 1.15; }
+  const yOf = v => {
+    const t = data.log ? (Math.log10(Math.max(v, lo)) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)) : (v - lo) / (hi - lo);
+    return B - t * (B - T);
+  };
+  g.strokeStyle = '#2e3338'; g.lineWidth = 1; g.textAlign = 'center';
+  const fs = niceStep(fmax - fmin, 10);
+  for (let v = Math.ceil(fmin / fs) * fs; v <= fmax + 1e-9; v += fs) {
+    const x = xOf(v); g.beginPath(); g.moveTo(x, T); g.lineTo(x, B); g.stroke(); g.fillText(fmt(v), x, B + 15);
+  }
+  g.fillText('Hz', R - 10, h - 2);
+  g.textAlign = 'right';
+  if (data.log) { for (let d = lo; d <= hi * 1.001; d *= 10) { const y = yOf(d); g.beginPath(); g.moveTo(L, y); g.lineTo(R, y); g.stroke(); g.fillText(fmt(d), L - 5, y + 4); } }
+  else { const s = niceStep(hi, 6); for (let v = 0; v <= hi; v += s) { const y = yOf(v); g.beginPath(); g.moveTo(L, y); g.lineTo(R, y); g.stroke(); g.fillText(fmt(v), L - 5, y + 4); } }
+  g.textAlign = 'left'; g.fillText(data.unit, 6, T - 10);
+  const series = [data.x, data.y, data.z, data.t], cols = [...AX, TOT], names = ['x', 'y', 'z', '|xyz|'];
+  g.save(); g.beginPath(); g.rect(L, T - 2, R - L, B - T + 2); g.clip();
+  series.forEach((s, a) => {
+    g.beginPath(); g.strokeStyle = cols[a]; g.lineWidth = a === 3 ? 1 : 1.5; g.setLineDash(a === 3 ? [4, 3] : []);
+    s.forEach((v, i) => { const x = xOf(f[i]), y = yOf(v ?? lo); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.stroke();
+  });
+  g.restore(); g.setLineDash([]);
+  let lx = L + 40;
+  names.forEach((n, a) => { g.strokeStyle = cols[a]; g.lineWidth = 2; g.beginPath(); g.moveTo(lx, T - 14); g.lineTo(lx + 16, T - 14); g.stroke(); g.fillStyle = '#e6e6e6'; g.fillText(n, lx + 20, T - 10); lx += 60; });
+  (data.peaks || []).forEach((p, i) => {
+    if (p.f < fmin || p.f > fmax) return;
+    let k = 0; f.forEach((v, j) => { if (Math.abs(v - p.f) < Math.abs(f[k] - p.f)) k = j; });
+    const x = xOf(p.f), y = yOf(data.t[k]);
+    g.fillStyle = PK[i % PK.length];
+    g.beginPath(); g.moveTo(x, y - 4); g.lineTo(x - 6, y - 14); g.lineTo(x + 6, y - 14); g.closePath(); g.fill();
+    g.textAlign = 'center'; g.fillText(p.f.toFixed(1), x, y - 18); g.textAlign = 'left';
+  });
+}
+
+function drawVec() {
+  const [g, w, h] = setupCanvas($('vec'));
+  g.fillStyle = '#1b1f24'; g.fillRect(0, 0, w, h);
+  const cx = w / 2, cy = h / 2 + 8, sc = Math.min(w, h) * 0.36;
+  const yr = yaw * Math.PI / 180, pr = pitch * Math.PI / 180;
+  const P = u => { const v = [u[0], u[2], -u[1]]; const x1 = v[0] * Math.cos(yr) + v[2] * Math.sin(yr), z1 = -v[0] * Math.sin(yr) + v[2] * Math.cos(yr);
+    const y2 = v[1] * Math.cos(pr) - z1 * Math.sin(pr); return [cx + x1 * sc, cy - y2 * sc]; };
+  const hx = .3, hy = .3, hz = .3, cs = [];
+  for (const a of [-1, 1]) for (const b of [-1, 1]) for (const d of [-1, 1]) cs.push([a * hx, b * hy, d * hz]);
+  g.strokeStyle = '#3a4148'; g.lineWidth = 1.2;
+  for (let i = 0; i < 8; i++) for (let j = i + 1; j < 8; j++) {
+    if ([0, 1, 2].filter(k => cs[i][k] !== cs[j][k]).length === 1) { const a = P(cs[i]), b = P(cs[j]); g.beginPath(); g.moveTo(...a); g.lineTo(...b); g.stroke(); }
+  }
+    g.font = '12px system-ui';
+  function arrow(a, b, col, lw, label, dashed, two) {
+    const p1 = P(a), p2 = P(b);
+    g.strokeStyle = col; g.lineWidth = lw; g.lineCap = 'round'; g.setLineDash(dashed ? [6, 4] : []);
+    g.beginPath(); g.moveTo(...p1); g.lineTo(...p2); g.stroke(); g.setLineDash([]);
+    const head = (s, e) => { const dx = e[0] - s[0], dy = e[1] - s[1], l = Math.hypot(dx, dy); if (l < 1) return;
+      const ux = dx / l, uy = dy / l, hs = 10; g.beginPath();
+      g.moveTo(e[0], e[1]); g.lineTo(e[0] - hs * (ux - .5 * uy), e[1] - hs * (uy + .5 * ux));
+      g.moveTo(e[0], e[1]); g.lineTo(e[0] - hs * (ux + .5 * uy), e[1] - hs * (uy - .5 * ux)); g.stroke(); };
+    head(p1, p2); if (two) head(p2, p1);
+    if (label) { g.fillStyle = col; g.fillText(label, p2[0] + 5, p2[1] - 5); }
+  }
+  for (let a = 0; a < 3; a++) arrow([0, 0, 0], [0, 1, 2].map(k => k === a ? 1.05 : 0), AX[a], 1.5, 'xyz'[a]);
+  if (data && data.vertical) arrow([0, 0, 0], data.vertical.map(v => -v * .9), '#e6e6e6', 1.2, 'down (assumed)', true);
+  const peaks = (data && data.peaks) || [], mx = Math.max(0, ...peaks.map(p => p.main));
+  peaks.forEach((p, i) => { const l = mx > 0 ? .25 + .75 * p.main / mx : 1;
+    arrow(p.dir.map(v => -v * l), p.dir.map(v => v * l), PK[i % PK.length], 3, p.f.toFixed(1) + ' Hz', false, true); });
+}
+
+function drawPeaks() {
+  const el = $('peaks-table');
+  if (!data || !data.peaks) { el.textContent = '–'; return; }
+  if (!data.peaks.length) { el.textContent = 'No peak above the noise floor.'; return; }
+  const u = data.unit;
+  let h = `<table><tr><th>#</th><th>f (Hz)</th><th>x</th><th>y</th><th>z</th><th>total</th><th>main axis</th></tr>`;
+  data.peaks.forEach((p, i) => {
+    h += `<tr><td style="color:${PK[i % PK.length]}">${i + 1}</td><td>${p.f.toFixed(2)}</td>` + p.amp.map(v => `<td>${v.toPrecision(3)}</td>`).join('') +
+      `<td>${p.total.toPrecision(3)}</td><td>${p.main.toPrecision(3)}</td></tr>`;
+  });
+  h += `</table><p class="muted">Amplitudes: sine peak, ${u}.</p><table><tr><th>#</th><th>direction (x, y, z)</th><th>azim.</th><th>elev.</th><th>from vertical</th><th>linearity</th></tr>`;
+  data.peaks.forEach((p, i) => {
+    h += `<tr><td style="color:${PK[i % PK.length]}">${i + 1}</td><td>(${p.dir.map(v => v.toFixed(2)).join(', ')})</td><td>${p.az.toFixed(0)}°</td><td>${p.el.toFixed(0)}°</td><td>${p.vert.toFixed(0)}°</td><td>${p.lin.toFixed(2)}</td></tr>`;
+  });
+  h += `</table><p class="muted">Sensor axes x, y, z (WebDAQ channels); the vertical is assumed along ${st ? st.vertical : 'z'} (IEPE inputs are AC coupled, gravity is not measured). Linearity 1 = straight-line motion. RMS in band (m/s²): x ${data.rms[0]}, y ${data.rms[1]}, z ${data.rms[2]}.</p>`;
+  el.innerHTML = h;
+}
+
+function showStatus() {
+  if (!st) return;
+  const s = st, cls = s.running ? (s.hold ? 'held' : 'live') : 'stopped';
+  let t = `<b class="${cls}">${s.running ? (s.hold ? 'HELD' : 'LIVE') : s.starting ? 'STARTING' : 'STOPPED'}</b> · ${s.rate} Hz`;
+  if (s.freeMB != null) t += ` · WebDAQ free ${s.freeMB} MB`;
+  if (data && data.fs) t += ` · window ${data.duration.toFixed(1)} s, ${data.segments} avg, Δf ${data.resHz.toFixed(2)} Hz`;
+  if (s.snapshotIn != null) t += ` · <b class="held">snapshot in ${Math.max(0, s.snapshotIn).toFixed(1)} s</b>`;
+  if (s.message) t += ' · ' + s.message;
+  $('status').innerHTML = t;
+  $('run').textContent = (s.running || s.starting) ? 'Stop' : 'Start';
+  $('hold').textContent = s.hold ? 'Live' : 'Hold';
+  $('cancel').hidden = s.snapshotIn == null;
+  $('info').textContent = `${s.sensor}.`; $('snapdir').textContent = '(saved on this PC in ' + s.snapDir + ')';
+  if (!formLoaded) loadForm();
+  if (s.lastSnapshot !== lastSnap) { lastSnap = s.lastSnapshot; loadSnaps(); }
+}
+
+function loadForm() {
+  const p = st.params;
+  $('rate').innerHTML = st.rates.map(r => `<option value="${r}">${r}</option>`).join('');
+  $('rate').value = st.rateSet;
+  $('unit').innerHTML = st.units.map(u => `<option value="${u.id}">${u.label}</option>`).join('');
+  $('avg').value = p.avg; $('res').value = p.res; $('fmin').value = p.fmin; $('fmax').value = p.fmax;
+  $('unit').value = p.unit; $('log').value = p.log ? '1' : '0'; $('peaks').value = p.peaks; $('delay').value = st.delay;
+  formLoaded = true;
+}
+
+async function loadSnaps() {
+  try {
+    const list = await api('/api/snapshots');
+    $('snaps').innerHTML = list.length ? list.map(s => `<div class="snap"><b>${s.name}</b><br>` +
+      s.files.map(f => `<a href="/files/${s.name}/${f.name}" target="_blank">${f.name.replace(s.name + '_', '')}</a>`).join('') +
+      `<a href="/files/${s.name}.zip">zip</a></div>`).join('') : 'None yet.';
+  } catch (e) {}
+}
+
+async function poll() {
+  try {
+    const d = await api('/api/data?since=' + seq);
+    st = d.status;
+    if (d.f) { data = d; seq = d.seq; drawSpec(); drawVec(); drawPeaks(); }
+    showStatus();
+  } catch (e) { $('status').textContent = 'connection lost, retrying…'; }
+  setTimeout(poll, 400);
+}
+
+async function cmd(path) { try { st = await api(path); showStatus(); } catch (e) {} }
+$('run').onclick = () => cmd(st && (st.running || st.starting) ? '/api/stop' : '/api/start');
+$('hold').onclick = () => cmd('/api/hold?on=' + (st && st.hold ? 0 : 1));
+$('snap').onclick = () => cmd('/api/snapshot?delay=' + encodeURIComponent($('delay').value || 0));
+$('cancel').onclick = () => cmd('/api/cancel');
+$('delay').onchange = () => cmd('/api/set?delay=' + encodeURIComponent($('delay').value || 0));
+$('apply').onclick = async () => {
+  const q = ['avg', 'res', 'fmin', 'fmax', 'unit', 'log', 'peaks', 'rate'].map(k => k + '=' + encodeURIComponent($(k).value)).join('&');
+  await cmd('/api/set?' + q); formLoaded = false; seq = -1;
+};
+document.querySelectorAll('main input').forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') $('apply').click(); }));
+$('savepng').onclick = () => {
+  const s = $('spec'), v = $('vec'), out = document.createElement('canvas');
+  out.width = s.width + v.width; out.height = Math.max(s.height, v.height);
+  const g = out.getContext('2d'); g.fillStyle = '#1b1f24'; g.fillRect(0, 0, out.width, out.height);
+  g.drawImage(s, 0, 0); g.drawImage(v, s.width, 0);
+  const a = document.createElement('a'); a.download = 'vibspec_webdaq_view_' + new Date().toISOString().replace(/[:.]/g, '-') + '.png';
+  a.href = out.toDataURL('image/png'); a.click();
+};
+const vc = $('vec'); let drag = null;
+vc.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; vc.setPointerCapture(e.pointerId); });
+vc.addEventListener('pointermove', e => { if (!drag) return; yaw += (e.clientX - drag[0]) * .5; pitch = Math.max(-90, Math.min(90, pitch + (e.clientY - drag[1]) * .5)); drag = [e.clientX, e.clientY]; drawVec(); });
+vc.addEventListener('pointerup', () => drag = null);
+window.addEventListener('resize', () => { drawSpec(); drawVec(); });
+setInterval(loadSnaps, 10000);
+poll();
+</script>
+</body>
+</html>
