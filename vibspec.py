@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 import numpy as np
+import requests
 
 import analyzer as A
 from webdaq import RUNNING_CODES, WebDAQ
@@ -80,6 +81,7 @@ class Engine:
         self.snap_due_wall = None
         self.stop_evt = threading.Event()
         self.takeover = False
+        self.closing = False
 
     # ---------- settings ----------
     def _load_settings(self):
@@ -428,6 +430,7 @@ class Engine:
                 (self.snap_target - (self.buf_start + len(self.buf))) / self.rate + p.avg_s)
             return {
                 'running': self.want_run and self.acquiring, 'starting': self.want_run and not self.acquiring,
+                'closing': self.closing,
                 'hold': self.hold, 'rate': round(self.measured_rate or self.rate, 1), 'rateSet': self.rate,
                 'rates': RATES, 'sensor': self.device, 'message': self.message,
                 'freeMB': None if self.free_bytes is None else round(self.free_bytes / 1e6),
@@ -562,14 +565,29 @@ def main():
     # On Windows SO_REUSEADDR lets a second server bind a port that is in use: disable it, so that a second
     # copy of the app notices the first one instead of fighting over the WebDAQ job.
     ThreadingHTTPServer.allow_reuse_address = os.name != 'nt'
-    try:
-        srv = ThreadingHTTPServer((args.bind, args.port), make_handler(eng))
-    except OSError:
-        print(f'VibSpec is already running at {url} (port {args.port} is in use): opening it instead.')
-        if not args.no_browser:
-            webbrowser.open(url)
-            time.sleep(3)
-        return
+    srv, t_end = None, time.time() + 20
+    while srv is None:
+        try:
+            srv = ThreadingHTTPServer((args.bind, args.port), make_handler(eng))
+        except OSError:
+            # Port in use: either another copy is running (open its page and quit), or a copy is still shutting
+            # down after its window was closed (it says "closing", or no longer answers): wait for the port.
+            other = None
+            try:
+                other = requests.get(url.replace('localhost', '127.0.0.1') + '/api/status', timeout=2).json()
+            except Exception:
+                pass
+            if other is not None and not other.get('closing'):
+                print(f'VibSpec is already running at {url}: opening it instead.')
+                if not args.no_browser:
+                    webbrowser.open(url)
+                    time.sleep(3)
+                return
+            if time.time() > t_end:
+                print(f'Port {args.port} is in use by another program: use --port to choose another one.')
+                return
+            print(f'waiting for port {args.port} (previous VibSpec still closing)...')
+            time.sleep(1)
     srv.daemon_threads = True
     t_daq = threading.Thread(target=eng.daq_loop, name='daq', daemon=True)
     t_daq.start()
@@ -584,6 +602,7 @@ def main():
 
     def stop_device_now():
         """Stop the WebDAQ job and delete its log (called when the console window is closed)."""
+        eng.closing = True
         eng.want_run = False
         eng.stop_evt.set()
         t_daq.join(timeout=4.5)   # Windows allows ~5 s after a console close event
@@ -606,6 +625,7 @@ def main():
         pass
     finally:
         print('stopping...')
+        eng.closing = True
         eng.want_run = False
         eng.stop_evt.set()
         t_daq.join(timeout=15)
