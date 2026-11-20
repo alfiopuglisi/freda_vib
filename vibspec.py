@@ -43,14 +43,7 @@ class Engine:
         self.channels = tuple(int(c) for c in args.channels.split(','))          # triaxial x, y, z
         self.extra = None if args.extra in ('', 'none') else int(args.extra)       # single-axis channel
         self.extra_name = args.extra_name
-        names = args.names.split(',')
-        self.chan_spec = [(c, names[i], args.sensitivity) for i, c in enumerate(self.channels)]
-        if self.extra is not None:
-            self.chan_spec.append((self.extra, self.extra_name, args.extra_sensitivity))
-        # the WebDAQ returns the channels sorted by number; column of each wanted channel in that data
-        nums = sorted(c for c, _, _ in self.chan_spec)
-        self.cols = [nums.index(c) for c, _, _ in self.chan_spec]
-        self.ncols = len(self.chan_spec)
+        self.extra_on = True          # user setting: acquire and show the single-axis channel
         self.vertical = np.array(AXES[args.vertical], float)
         self.snap_root = os.path.abspath(args.snapshots)
         self.settings_file = os.path.join(HERE, 'settings.json')
@@ -61,6 +54,7 @@ class Engine:
         self.snapshot_delay = 5.0
         self.autostart = True
         self._load_settings()
+        self._set_channels()
         # state
         self.want_run = self.autostart
         self.acquiring = False
@@ -83,6 +77,18 @@ class Engine:
         self.takeover = False
         self.closing = False
 
+    def _set_channels(self):
+        """Channels acquired in the next run: triaxial, plus the single-axis one if available and enabled."""
+        names = self.args.names.split(',')
+        spec = [(c, names[i], self.args.sensitivity) for i, c in enumerate(self.channels)]
+        if self.extra is not None and self.extra_on:
+            spec.append((self.extra, self.extra_name, self.args.extra_sensitivity))
+        # the WebDAQ returns the channels sorted by number; column of each wanted channel in that data
+        nums = sorted(c for c, _, _ in spec)
+        self.chan_spec = spec
+        self.cols = [nums.index(c) for c, _, _ in spec]
+        self.ncols = len(spec)
+
     # ---------- settings ----------
     def _load_settings(self):
         try:
@@ -92,6 +98,7 @@ class Engine:
             self.rate = int(s.get('rate', self.rate))
             self.snapshot_delay = float(s.get('delay', self.snapshot_delay))
             self.autostart = bool(s.get('autostart', self.autostart))
+            self.extra_on = bool(s.get('extra', self.extra_on))
         except FileNotFoundError:
             pass
         except Exception as e:
@@ -101,7 +108,8 @@ class Engine:
         try:
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump({'params': dataclasses.asdict(self.params), 'rate': self.rate,
-                           'delay': self.snapshot_delay, 'autostart': self.autostart}, f, indent=1)
+                           'delay': self.snapshot_delay, 'autostart': self.autostart, 'extra': self.extra_on},
+                          f, indent=1)
         except Exception as e:
             print('cannot save settings:', e)
 
@@ -122,6 +130,13 @@ class Engine:
             if num('rate') is not None and int(num('rate')) != self.rate:
                 self.rate = int(min(max(num('rate'), 100), 51200))
                 self.restart_req = True
+            if 'extra' in q and (q['extra'] in ('1', 'true')) != self.extra_on:
+                self.extra_on = q['extra'] in ('1', 'true')
+                if self.acquiring:
+                    self.restart_req = True   # the channel list of the WebDAQ job changes
+                else:
+                    self._set_channels()
+                    self.buf = np.zeros((0, self.ncols))
             self._save_settings()
             self.seq += 1  # force the page to re-read even when held
 
@@ -209,6 +224,8 @@ class Engine:
             time.sleep(1)
         self.takeover = True   # from now on this instance owns the job (rotations, error recovery)
         info = self.daq.info()
+        with self.lock:
+            self._set_channels()
         chs = ', '.join(f'ch{c} {n} {s * 1000:g} mV/g' for c, n, s in self.chan_spec)
         self.device = f"{info.get('model', 'WebDAQ')} {info.get('name', '')} @ {self.args.host}, job {self.daq.job} ({chs})"
         self.daq.ensure_job(self.rate, self.chan_spec)
@@ -431,6 +448,7 @@ class Engine:
             return {
                 'running': self.want_run and self.acquiring, 'starting': self.want_run and not self.acquiring,
                 'closing': self.closing,
+                'extraAvailable': self.extra is not None, 'extraOn': self.extra_on, 'extraName': self.extra_name,
                 'hold': self.hold, 'rate': round(self.measured_rate or self.rate, 1), 'rateSet': self.rate,
                 'rates': RATES, 'sensor': self.device, 'message': self.message,
                 'freeMB': None if self.free_bytes is None else round(self.free_bytes / 1e6),

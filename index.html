@@ -60,6 +60,7 @@
         <label>Y scale <select id="log"><option value="1">log</option><option value="0">linear</option></select></label>
         <label>Peaks <input id="peaks" type="number" min="1" max="5" step="1"></label>
         <label>Sample rate <select id="rate"></select> Hz</label>
+        <label id="extraBox" hidden title="Single-axis accelerometer: acquire it and show its line (changing it restarts the acquisition)"><input id="extra" type="checkbox" style="width:auto"> <span id="extraLabel">single-axis</span></label>
         <button id="apply" class="primary">Apply</button>
         <button id="savepng">Download this view (PNG)</button>
       </div>
@@ -222,6 +223,7 @@ function loadForm() {
   $('unit').innerHTML = st.units.map(u => `<option value="${u.id}">${u.label}</option>`).join('');
   $('avg').value = p.avg; $('res').value = p.res; $('fmin').value = p.fmin; $('fmax').value = p.fmax;
   $('unit').value = p.unit; $('log').value = p.log ? '1' : '0'; $('peaks').value = p.peaks; $('delay').value = st.delay;
+  $('extraBox').hidden = !st.extraAvailable; $('extra').checked = st.extraOn; $('extraLabel').textContent = st.extraName;
   formLoaded = true;
 }
 
@@ -250,6 +252,7 @@ $('hold').onclick = () => cmd('/api/hold?on=' + (st && st.hold ? 0 : 1));
 $('snap').onclick = () => cmd('/api/snapshot?delay=' + encodeURIComponent($('delay').value || 0));
 $('cancel').onclick = () => cmd('/api/cancel');
 $('delay').onchange = () => cmd('/api/set?delay=' + encodeURIComponent($('delay').value || 0));
+$('extra').onchange = async () => { await cmd('/api/set?extra=' + ($('extra').checked ? 1 : 0)); seq = -1; };
 $('apply').onclick = async () => {
   const q = ['avg', 'res', 'fmin', 'fmax', 'unit', 'log', 'peaks', 'rate'].map(k => k + '=' + encodeURIComponent($(k).value)).join('&');
   await cmd('/api/set?' + q); formLoaded = false; seq = -1;

@@ -33,7 +33,9 @@ Needs Python 3.8+ with numpy, requests and matplotlib (Anaconda has them).
   and the **3-D vibration direction** (principal axis of the band-limited covariance) with azimuth/elevation,
   angle from vertical and linearity (1 = straight line, 0.5 = planar, 0.33 = isotropic).
 - **Single-axis channel** (`bench_z`): its spectrum is drawn as an extra line, with its band RMS and its
-  amplitude at each peak; it is not used for the 3-D direction.
+  amplitude at each peak; it is not used for the 3-D direction. The **bench_z** checkbox in Settings turns it
+  off/on: unticked, channel 3 is removed from the WebDAQ job (the acquisition restarts, a few seconds are
+  lost). The choice is remembered.
 - **Snapshots** (with a start delay, so you can walk away): saved in `snapshots/vib_YYYYMMDD_HHMMSS/` as
   `_plot.png`, `_summary.txt`, `_spectrum.csv`, `_raw.csv`, downloadable from the page (also as zip).
 
