@@ -32,12 +32,11 @@ def _channel(number, name, sensitivity, color):
     }
 
 
-def default_job(name, rate, channels=(0, 1, 2), sensitivity=1.0):
-    """Job descriptor used when the job does not exist on the device yet."""
-    cols = ['#DD3222', '#FFC000', '#3482CB']
+def default_job(name, rate):
+    """Job descriptor used when the job does not exist on the device yet (channels are set by ensure_job)."""
     return {
         'productId': 316, 'type': 'job', 'version': 1, 'name': name,
-        'channels': [_channel(ch, 'xyz'[i], sensitivity, cols[i]) for i, ch in enumerate(channels)],
+        'channels': [],
         'acquisition': {'sample': {'rate': rate}, 'startTrigger': {'type': 'immediate', 'timeout': 0},
                         'stopTrigger': {'type': 'manual', 'timeout': 0}},
         'logging': {'enable': True, 'logFile': {'name': name, 'path': f'/storage/data/{name}/', 'appendTime': True},
@@ -86,14 +85,24 @@ class WebDAQ:
         return None
 
     # --- job management ---
-    def ensure_job(self, rate, channels=(0, 1, 2)):
-        """Create/update the job so that it has the requested rate, channels and logs into its own folder.
-        Returns the descriptor in use. Channel names, sensitivities etc. of an existing job are kept."""
+    def ensure_job(self, rate, channels):
+        """Create/update the job so that it has the requested rate and channels and logs into its own folder.
+        channels: list of (number, name, sensitivity in V/g). Other settings of existing channels are kept.
+        Returns the descriptor in use; its channels are sorted by number, which is the order of the samples."""
         self.wipe_folder()
         d = self.job_descriptor()
         if d is None:
-            d = default_job(self.job, rate, channels)
+            d = default_job(self.job, rate)
         want = copy.deepcopy(d)
+        old = {c['number']: c for c in want['channels']}
+        cols = ['#DD3222', '#FFC000', '#3482CB', '#8E24AA']
+        chans = []
+        for i, (num, name, sens) in enumerate(sorted(channels)):
+            c = old.get(num) or _channel(num, name, sens, cols[i % len(cols)])
+            c.update({'name': name, 'sensorSensitivity': sens, 'type': 'acceleration', 'unit': 'g', 'iepe': True,
+                      'couplingMode': 'ac'})
+            chans.append(c)
+        want['channels'] = chans
         want['acquisition']['sample']['rate'] = rate
         want['acquisition']['stopTrigger'] = {'type': 'manual', 'timeout': 0}
         want['logging']['enable'] = True

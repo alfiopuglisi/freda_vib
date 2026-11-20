@@ -31,6 +31,7 @@
   .snap { padding:6px 0; border-bottom:1px solid var(--grid); }
   .snap a { margin-right:10px; }
   .muted { color:var(--muted); font-size:12px; }
+  #peaks-table { overflow-x:auto; }
   h2 { font-size:14px; margin:4px 0 8px; color:var(--muted); font-weight:600; }
 </style>
 </head>
@@ -73,7 +74,7 @@
 </main>
 <script>
 const $ = id => document.getElementById(id);
-const AX = ['#e53935', '#43a047', '#1e88e5'], TOT = '#ffffff';
+const AX = ['#e53935', '#43a047', '#1e88e5'], TOT = '#ffffff', EXT = '#26c6da';
 const PK = ['#fb8c00', '#8e24aa', '#00897b', '#6d4c41', '#d81b60'];
 let data = null, st = null, seq = -1, yaw = -35, pitch = 25, formLoaded = false, lastSnap = null;
 
@@ -109,7 +110,7 @@ function drawSpec() {
   const L = 56, R = w - 12, T = 26, B = h - 28;
   const f = data.f, fmin = data.fmin, fmax = data.fmax;
   const xOf = v => L + (v - fmin) / (fmax - fmin) * (R - L);
-  const vmax = Math.max(1e-12, ...data.t.filter(v => v != null));
+  const vmax = Math.max(1e-12, ...data.t.filter(v => v != null), ...(data.e || []).filter(v => v != null));
   let lo, hi;
   if (data.log) { hi = Math.pow(10, Math.ceil(Math.log10(vmax * 1.2))); lo = hi / 1e4; } else { lo = 0; hi = vmax * 1.15; }
   const yOf = v => {
@@ -127,6 +128,7 @@ function drawSpec() {
   else { const s = niceStep(hi, 6); for (let v = 0; v <= hi; v += s) { const y = yOf(v); g.beginPath(); g.moveTo(L, y); g.lineTo(R, y); g.stroke(); g.fillText(fmt(v), L - 5, y + 4); } }
   g.textAlign = 'left'; g.fillText(data.unit, 6, T - 10);
   const series = [data.x, data.y, data.z, data.t], cols = [...AX, TOT], names = ['x', 'y', 'z', '|xyz|'];
+  if (data.e) { series.push(data.e); cols.push(EXT); names.push(data.extraName); }
   g.save(); g.beginPath(); g.rect(L, T - 2, R - L, B - T + 2); g.clip();
   series.forEach((s, a) => {
     g.beginPath(); g.strokeStyle = cols[a]; g.lineWidth = a === 3 ? 1 : 1.5; g.setLineDash(a === 3 ? [4, 3] : []);
@@ -135,7 +137,7 @@ function drawSpec() {
   });
   g.restore(); g.setLineDash([]);
   let lx = L + 40;
-  names.forEach((n, a) => { g.strokeStyle = cols[a]; g.lineWidth = 2; g.beginPath(); g.moveTo(lx, T - 14); g.lineTo(lx + 16, T - 14); g.stroke(); g.fillStyle = '#e6e6e6'; g.fillText(n, lx + 20, T - 10); lx += 60; });
+  names.forEach((n, a) => { g.strokeStyle = cols[a]; g.lineWidth = 2; g.beginPath(); g.moveTo(lx, T - 14); g.lineTo(lx + 16, T - 14); g.stroke(); g.fillStyle = '#e6e6e6'; g.fillText(n, lx + 20, T - 10); lx += 30 + g.measureText(n).width + 14; });
   (data.peaks || []).forEach((p, i) => {
     if (p.f < fmin || p.f > fmax) return;
     let k = 0; f.forEach((v, j) => { if (Math.abs(v - p.f) < Math.abs(f[k] - p.f)) k = j; });
@@ -183,16 +185,16 @@ function drawPeaks() {
   if (!data || !data.peaks) { el.textContent = '–'; return; }
   if (!data.peaks.length) { el.textContent = 'No peak above the noise floor.'; return; }
   const u = data.unit;
-  let h = `<table><tr><th>#</th><th>f (Hz)</th><th>x</th><th>y</th><th>z</th><th>total</th><th>main axis</th></tr>`;
+  let h = `<table><tr><th>#</th><th>f (Hz)</th><th>x</th><th>y</th><th>z</th><th>total</th><th>main axis</th>` + (data.e ? `<th style="color:${EXT}">${data.extraName}</th>` : '') + `</tr>`;
   data.peaks.forEach((p, i) => {
     h += `<tr><td style="color:${PK[i % PK.length]}">${i + 1}</td><td>${p.f.toFixed(2)}</td>` + p.amp.map(v => `<td>${v.toPrecision(3)}</td>`).join('') +
-      `<td>${p.total.toPrecision(3)}</td><td>${p.main.toPrecision(3)}</td></tr>`;
+      `<td>${p.total.toPrecision(3)}</td><td>${p.main.toPrecision(3)}</td>` + (data.e ? `<td>${p.extra.toPrecision(3)}</td>` : '') + `</tr>`;
   });
   h += `</table><p class="muted">Amplitudes: sine peak, ${u}.</p><table><tr><th>#</th><th>direction (x, y, z)</th><th>azim.</th><th>elev.</th><th>from vertical</th><th>linearity</th></tr>`;
   data.peaks.forEach((p, i) => {
     h += `<tr><td style="color:${PK[i % PK.length]}">${i + 1}</td><td>(${p.dir.map(v => v.toFixed(2)).join(', ')})</td><td>${p.az.toFixed(0)}°</td><td>${p.el.toFixed(0)}°</td><td>${p.vert.toFixed(0)}°</td><td>${p.lin.toFixed(2)}</td></tr>`;
   });
-  h += `</table><p class="muted">Sensor axes x, y, z (WebDAQ channels); the vertical is assumed along ${st ? st.vertical : 'z'} (IEPE inputs are AC coupled, gravity is not measured). Linearity 1 = straight-line motion. RMS in band (m/s²): x ${data.rms[0]}, y ${data.rms[1]}, z ${data.rms[2]}.</p>`;
+  h += `</table><p class="muted">Sensor axes x, y, z (WebDAQ channels); the vertical is assumed along ${st ? st.vertical : 'z'} (IEPE inputs are AC coupled, gravity is not measured). Linearity 1 = straight-line motion. RMS in band (m/s²): x ${data.rms[0]}, y ${data.rms[1]}, z ${data.rms[2]}` + (data.e ? `, ${data.extraName} ${data.rmsE}` : '') + `. ${data.extraName ? data.extraName + ' is a single-axis sensor: it is not used for the 3-D direction.' : ''}</p>`;
   el.innerHTML = h;
 }
 

@@ -1,7 +1,8 @@
 # freda_vib: VibSpec for a WebDAQ-504
 
 Vibration spectrum analyser for a PC connected to an MCC **WebDAQ-504** with a triaxial IEPE accelerometer
-(default `192.168.34.61`, channels 0/1/2 = x/y/z). It is a port of
+(default `192.168.34.61`, channels 0/1/2 = x/y/z) and a single-axis IEPE accelerometer (channel 3,
+`bench_z`), all 100 mV/g. It is a port of
 [vibspec](https://github.com/alfiopuglisi/vibspec) (an Android app that does the same with the phone's
 accelerometer) and has the same web page, analysis and HTTP API.
 
@@ -10,9 +11,16 @@ accelerometer) and has the same web page, analysis and HTTP API.
 Double-click `vibspec.bat` (or the desktop shortcut). It starts the app and opens `http://localhost:8080`.
 Close the window (or Ctrl+C) to quit: the WebDAQ job is stopped and its temporary log deleted.
 
-`python vibspec.py --help` lists the options: `--host`, `--job` (default `freda`), `--vertical` (sensor axis
-pointing up, default `z`), `--port`, `--bind 0.0.0.0` (let other computers open the page; no password),
-`--rotate-min`, `--min-free-mb`, `--snapshots`.
+`python vibspec.py --help` lists the options: `--host`, `--job` (default `freda`), `--channels` (triaxial,
+default `0,1,2`), `--sensitivity` (triaxial, V/g, default 0.1 = 100 mV/g), `--extra` (single-axis channel,
+default `3`, `none` to disable), `--extra-name`, `--extra-sensitivity` (default 0.1 V/g), `--vertical` (sensor
+axis pointing up, default `z`), `--port`, `--bind 0.0.0.0` (let other computers open the page; no password),
+`--rotate-min`, `--min-free-mb`, `--snapshots`. The sensitivities are written into the `freda` job on every
+start: the WebDAQ converts volts to g with them, so a wrong value scales every amplitude.
+
+Only one copy runs at a time: starting it again (e.g. double-clicking the shortcut twice) just opens the page
+of the running one. If `freda` is already running on the WebDAQ (another copy on another PC, or a copy that
+was killed), the app does not touch it until you press **Start** on its page.
 
 Needs Python 3.8+ with numpy, requests and matplotlib (Anaconda has them).
 
@@ -24,6 +32,8 @@ Needs Python 3.8+ with numpy, requests and matplotlib (Anaconda has them).
 - **Peaks** (up to 5, above 10× the median noise power): interpolated frequency, amplitude per axis, total,
   and the **3-D vibration direction** (principal axis of the band-limited covariance) with azimuth/elevation,
   angle from vertical and linearity (1 = straight line, 0.5 = planar, 0.33 = isotropic).
+- **Single-axis channel** (`bench_z`): its spectrum is drawn as an extra line, with its band RMS and its
+  amplitude at each peak; it is not used for the 3-D direction.
 - **Snapshots** (with a start delay, so you can walk away): saved in `snapshots/vib_YYYYMMDD_HHMMSS/` as
   `_plot.png`, `_summary.txt`, `_spectrum.csv`, `_raw.csv`, downloadable from the page (also as zip).
 
@@ -36,11 +46,11 @@ HTTP API (all GET): `/api/status`, `/api/data`, `/api/start`, `/api/stop`, `/api
 
 ## How it talks to the WebDAQ
 
-- On start it creates/updates the job `freda` on the WebDAQ (ch 0–2, IEPE, chosen rate, logging into
+- On start it creates/updates the job `freda` on the WebDAQ (ch 0–3, IEPE, chosen rate, logging into
   `/storage/data/freda/`) and runs it alone, like "Start job" in the WebDAQ page. Other saved jobs are not
   touched; if another job is running, the app refuses to start.
 - Live samples (`/api/v1.0/schedule/jobs/freda/samples/<start>/<count>/bin`, float64 in g) are only served
-  while the job logs to disk, and the WebDAQ storage is small (~290 MB free; 2560 Hz × 3 ch ≈ 220 MB/h).
+  while the job logs to disk, and the WebDAQ storage is small (~290 MB free; 2560 Hz × 4 ch ≈ 300 MB/h).
   So the app restarts the job every 10 minutes (`--rotate-min`, or earlier below `--min-free-mb`) and
   deletes `/storage/data/freda/` on every start/stop. A restart drops a few seconds of data.
 

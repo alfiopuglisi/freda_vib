@@ -48,6 +48,19 @@ def test_rms_and_units():
     assert abs(from_acc(2 * math.pi * 10, 10, 'VEL') - 1000) < 1e-9
 
 
+def test_extra_channel():
+    xyz = signal(5, [(30, 0.01, (1, 0, 0), 0)])
+    t = np.arange(len(xyz)) / FS
+    e = 0.004 * np.sin(2 * np.pi * 30 * t) + 0.002 * np.sin(2 * np.pi * 70 * t)
+    r = analyze(np.column_stack([xyz, e]), FS, Params(avg_s=5))
+    p = r.peaks[0]
+    assert abs(p.f - 30) < 0.02 and abs(p.amp_dir - 0.01) / 0.01 < 0.02   # 3-D analysis unchanged
+    assert abs(p.amp_extra - 0.004) / 0.004 < 0.02, p.amp_extra
+    assert abs(r.rms_e - math.sqrt(0.004 ** 2 + 0.002 ** 2) / math.sqrt(2)) < 1e-4, r.rms_e
+    k = np.argmin(np.abs(r.freq - 70))
+    assert 0.0017 < r.ae[k] < 0.00205, r.ae[k]
+
+
 def test_short_window_resolution():
     r = analyze(signal(0.5, [(40, 0.01, (1, 0, 0), 0)]), FS, Params(avg_s=0.5))
     assert abs(r.res_hz - 2.0) < 1e-9 and r.n_segments == 1

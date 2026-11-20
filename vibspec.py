@@ -39,7 +39,17 @@ class Engine:
     def __init__(self, args):
         self.args = args
         self.daq = WebDAQ(args.host, args.job)
-        self.channels = tuple(int(c) for c in args.channels.split(','))
+        self.channels = tuple(int(c) for c in args.channels.split(','))          # triaxial x, y, z
+        self.extra = None if args.extra in ('', 'none') else int(args.extra)       # single-axis channel
+        self.extra_name = args.extra_name
+        names = args.names.split(',')
+        self.chan_spec = [(c, names[i], args.sensitivity) for i, c in enumerate(self.channels)]
+        if self.extra is not None:
+            self.chan_spec.append((self.extra, self.extra_name, args.extra_sensitivity))
+        # the WebDAQ returns the channels sorted by number; column of each wanted channel in that data
+        nums = sorted(c for c, _, _ in self.chan_spec)
+        self.cols = [nums.index(c) for c, _, _ in self.chan_spec]
+        self.ncols = len(self.chan_spec)
         self.vertical = np.array(AXES[args.vertical], float)
         self.snap_root = os.path.abspath(args.snapshots)
         self.settings_file = os.path.join(HERE, 'settings.json')
@@ -63,12 +73,13 @@ class Engine:
         self.measured_rate = 0.0
         self.restart_req = False
         # sample buffer: rows = samples (m/s²); buf_start = absolute index of buf[0] in the current run
-        self.buf = np.zeros((0, 3))
+        self.buf = np.zeros((0, self.ncols))
         self.buf_start = 0
         self.run_started = None      # wall time of the current device run
         self.snap_target = None      # absolute sample index where the snapshot window starts
         self.snap_due_wall = None
         self.stop_evt = threading.Event()
+        self.takeover = False
 
     # ---------- settings ----------
     def _load_settings(self):
@@ -117,6 +128,7 @@ class Engine:
         with self.lock:
             self.want_run = True
             self.hold = False
+            self.takeover = True   # an explicit Start may take over a running job of the same name
 
     def stop(self):
         with self.lock:
@@ -183,12 +195,21 @@ class Engine:
             self.message = f'WebDAQ busy: job "{cur}" is running; stop it from the WebDAQ page first.'
             self.want_run = False
             return
-        if cur == self.daq.job:  # left over from a previous session
+        if cur == self.daq.job:
+            # Either left over from a session that was killed, or another VibSpec (on this or another PC) is using
+            # it. Never take it over silently: only after an explicit Start from this page.
+            if not self.takeover:
+                self.message = (f'Job "{cur}" is already running on the WebDAQ (another VibSpec, here or on another '
+                                f'PC?). Press Start to take it over.')
+                self.want_run = False
+                return
             self.daq.stop()
             time.sleep(1)
+        self.takeover = True   # from now on this instance owns the job (rotations, error recovery)
         info = self.daq.info()
-        self.device = f"{info.get('model', 'WebDAQ')} {info.get('name', '')} @ {self.args.host}, job {self.daq.job}"
-        self.daq.ensure_job(self.rate, self.channels)
+        chs = ', '.join(f'ch{c} {n} {s * 1000:g} mV/g' for c, n, s in self.chan_spec)
+        self.device = f"{info.get('model', 'WebDAQ')} {info.get('name', '')} @ {self.args.host}, job {self.daq.job} ({chs})"
+        self.daq.ensure_job(self.rate, self.chan_spec)
         self.daq.start()
         with self.lock:
             self.acquiring = True
@@ -196,7 +217,7 @@ class Engine:
             self.run_started = time.time()
             self.run_iter = None
             pending = None if self.snap_target is None else max(0, self.snap_target - (self.buf_start + len(self.buf)))
-            self.buf = np.zeros((0, 3))
+            self.buf = np.zeros((0, self.ncols))
             self.buf_start = 0
             self.fetched = 0
             if pending is not None:
@@ -232,19 +253,19 @@ class Engine:
         n = int(st.get('samplesAcquired', 0))
         if st.get('sampleRate'):
             self.measured_rate = float(st['sampleRate'])
-        nch = int(st.get('channelCount', len(self.channels)))
+        nch = int(st.get('channelCount', self.ncols))
         max_keep = int(self.rate * self.args.buffer_s)
         if n - self.fetched > max_keep:          # fell behind: skip ahead (and drop the buffer: discontinuity)
             self.fetched = n - max_keep
             with self.lock:
-                self.buf = np.zeros((0, 3))
+                self.buf = np.zeros((0, self.ncols))
                 self.buf_start = self.fetched
         while self.fetched < n:
             cnt = min(n - self.fetched, int(self.rate * 2))
             a = self.daq.samples(self.fetched, cnt, nch)
             if len(a) == 0:
                 break
-            xyz = a[:, :3] * A.G0  # g -> m/s²
+            xyz = a[:, self.cols] * A.G0  # g -> m/s²
             with self.lock:
                 self.buf = np.vstack([self.buf, xyz])
                 self.fetched += len(a)
@@ -304,6 +325,7 @@ class Engine:
              f'Sampling: {r.fs:.1f} Hz, {r.n_samples} samples, window {r.duration_s:.2f} s',
              f'Averaging: {r.n_segments} Hann segments of {r.seg_n / r.fs:.3f} s, 50% overlap, resolution {r.res_hz:.3f} Hz',
              f'Band {p.fmin:.1f}-{p.fmax:.1f} Hz, RMS x/y/z: {g(r.rms_band[0])} / {g(r.rms_band[1])} / {g(r.rms_band[2])} m/s²',
+             *([f'Single-axis channel {self.extra_name} (ch{self.extra}): RMS {g(r.rms_e)} m/s² in the band'] if r.ae is not None else []),
              f'Axes: sensor frame (WebDAQ channels {",".join(map(str, self.channels))} = x, y, z); '
              f'vertical assumed along {self.args.vertical} (IEPE inputs are AC coupled: gravity is not measured).',
              f'Amplitudes: sine peak amplitude in {lab}.']
@@ -315,6 +337,8 @@ class Engine:
                   f'  total {c(pk.amp_total)} {lab}, along main axis {c(pk.amp_dir)} {lab}',
                   f'  direction (x, y, z) = ({pk.dir[0]:.3f}, {pk.dir[1]:.3f}, {pk.dir[2]:.3f}), azimuth {az:.1f}°, elevation {el:.1f}°',
                   f'  angle from vertical {pk.angle_from_vertical:.1f}°, linearity {pk.linearity:.2f}']
+            if r.ae is not None:
+                L.append(f'  {self.extra_name}: {c(pk.amp_extra)} {lab}')
         if not r.peaks:
             L += ['', 'No peak above the noise floor.']
         return '\n'.join(L) + '\n'
@@ -327,15 +351,18 @@ class Engine:
         with open(os.path.join(d, name + '_summary.txt'), 'w', encoding='utf-8') as f:
             f.write(self.summary(r, f'VibSpec snapshot {name}'))
         with open(os.path.join(d, name + '_spectrum.csv'), 'w', encoding='utf-8') as f:
-            f.write(f'f_Hz,x_{u},y_{u},z_{u},total_{u},x_ms2,y_ms2,z_ms2,total_ms2,psdx_ms2^2/Hz,psdy_ms2^2/Hz,psdz_ms2^2/Hz\n')
+            en = self.extra_name
+            ex = f',{en}_{u},{en}_ms2,psd{en}_ms2^2/Hz' if r.ae is not None else ''
+            f.write(f'f_Hz,x_{u},y_{u},z_{u},total_{u},x_ms2,y_ms2,z_ms2,total_ms2,psdx_ms2^2/Hz,psdy_ms2^2/Hz,psdz_ms2^2/Hz{ex}\n')
             f.write(f'# amplitudes are sine peak amplitudes ({A.UNITS[u][0]}); unit={A.UNITS[u][0]}\n')
             conv = [A.from_acc(a, r.freq, u) for a in (r.ax, r.ay, r.az, r.atot)]
-            cols = np.column_stack([r.freq, *conv, r.ax, r.ay, r.az, r.atot, *r.psd])
+            extra = [A.from_acc(r.ae, r.freq, u), r.ae, r.psd_e] if r.ae is not None else []
+            cols = np.column_stack([r.freq, *conv, r.ax, r.ay, r.az, r.atot, *r.psd, *extra])
             np.savetxt(f, cols, fmt='%.6g', delimiter=',')
         with open(os.path.join(d, name + '_raw.csv'), 'w', encoding='utf-8') as f:
-            f.write('t_s,ax_ms2,ay_ms2,az_ms2\n')
+            f.write('t_s,ax_ms2,ay_ms2,az_ms2' + (f',{self.extra_name}_ms2' if r.raw.shape[1] > 3 else '') + '\n')
             t = np.arange(len(r.raw)) / r.fs
-            np.savetxt(f, np.column_stack([t, r.raw]), fmt=['%.6f', '%.6g', '%.6g', '%.6g'], delimiter=',')
+            np.savetxt(f, np.column_stack([t, r.raw]), fmt=['%.6f'] + ['%.6g'] * r.raw.shape[1], delimiter=',')
         try:
             self._plot_png(r, os.path.join(d, name + '_plot.png'), name)
         except Exception as e:
@@ -351,7 +378,10 @@ class Engine:
         fig = plt.figure(figsize=(14, 8), dpi=100)
         ax = fig.add_axes([0.06, 0.38, 0.6, 0.55])
         m = (r.freq >= max(p.fmin, r.freq[1])) & (r.freq <= min(p.fmax, r.fs / 2))
-        for a, col, lab, ls in [(r.ax, '#e53935', 'x', '-'), (r.ay, '#43a047', 'y', '-'), (r.az, '#1e88e5', 'z', '-'), (r.atot, 'k', '|xyz|', '--')]:
+        lines = [(r.ax, '#e53935', 'x', '-'), (r.ay, '#43a047', 'y', '-'), (r.az, '#1e88e5', 'z', '-'), (r.atot, 'k', '|xyz|', '--')]
+        if r.ae is not None:
+            lines.append((r.ae, '#00acc1', self.extra_name, '-'))
+        for a, col, lab, ls in lines:
             ax.plot(r.freq[m], A.from_acc(a[m], r.freq[m], u), ls, color=col, lw=1.0, label=lab)
         if p.log_y:
             ax.set_yscale('log')
@@ -423,13 +453,15 @@ class Engine:
                   'unit': A.UNITS[u][0], 'log': p.log_y, 'fmin': p.fmin, 'fmax': fmax,
                   'f': [r4(v) for v in f], 'x': arr(r.ax), 'y': arr(r.ay), 'z': arr(r.az), 't': arr(r.atot),
                   'vertical': [float(v) for v in r.vertical], 'rms': [r4(v) for v in r.rms_band]})
+        if r.ae is not None:
+            o.update({'e': arr(r.ae), 'extraName': self.extra_name, 'rmsE': r4(r.rms_e)})
         peaks = []
         for pk in r.peaks:
             az, el = A.az_el(pk.dir)
             c = lambda v: r4(A.from_acc(v, pk.f, u))
             peaks.append({'f': r4(pk.f), 'amp': [c(v) for v in pk.amp], 'total': c(pk.amp_total), 'main': c(pk.amp_dir),
                           'dir': [r4(v) for v in pk.dir], 'az': r4(az), 'el': r4(el),
-                          'vert': r4(pk.angle_from_vertical), 'lin': r4(pk.linearity)})
+                          'vert': r4(pk.angle_from_vertical), 'lin': r4(pk.linearity), 'extra': c(pk.amp_extra)})
         o['peaks'] = peaks
         return o
 
@@ -509,7 +541,12 @@ def main():
     ap = argparse.ArgumentParser(description='Vibration spectrum analyser for a WebDAQ-504 + triaxial accelerometer')
     ap.add_argument('--host', default='192.168.34.61', help='WebDAQ address')
     ap.add_argument('--job', default='freda', help='WebDAQ job used for streaming (created if missing)')
-    ap.add_argument('--channels', default='0,1,2', help='WebDAQ channels for x,y,z (only used when creating the job)')
+    ap.add_argument('--channels', default='0,1,2', help='WebDAQ channels of the triaxial x,y,z')
+    ap.add_argument('--names', default='board_x,board_y,board_z', help='names of the triaxial channels')
+    ap.add_argument('--sensitivity', type=float, default=0.1, help='triaxial sensitivity, V/g (0.1 = 100 mV/g)')
+    ap.add_argument('--extra', default='3', help='WebDAQ channel of the single-axis accelerometer ("none" to disable)')
+    ap.add_argument('--extra-name', default='bench_z', help='name of the single-axis channel')
+    ap.add_argument('--extra-sensitivity', type=float, default=0.1, help='single-axis sensitivity, V/g')
     ap.add_argument('--vertical', default='z', choices=list(AXES), help='sensor axis pointing up')
     ap.add_argument('--port', type=int, default=8080)
     ap.add_argument('--bind', default='127.0.0.1', help='0.0.0.0 to allow other computers to use the page')
@@ -520,13 +557,23 @@ def main():
     ap.add_argument('--no-browser', action='store_true')
     args = ap.parse_args()
 
+    url = f'http://{"localhost" if args.bind in ("127.0.0.1", "0.0.0.0") else args.bind}:{args.port}'
     eng = Engine(args)
-    srv = ThreadingHTTPServer((args.bind, args.port), make_handler(eng))
+    # On Windows SO_REUSEADDR lets a second server bind a port that is in use: disable it, so that a second
+    # copy of the app notices the first one instead of fighting over the WebDAQ job.
+    ThreadingHTTPServer.allow_reuse_address = os.name != 'nt'
+    try:
+        srv = ThreadingHTTPServer((args.bind, args.port), make_handler(eng))
+    except OSError:
+        print(f'VibSpec is already running at {url} (port {args.port} is in use): opening it instead.')
+        if not args.no_browser:
+            webbrowser.open(url)
+            time.sleep(3)
+        return
     srv.daemon_threads = True
     t_daq = threading.Thread(target=eng.daq_loop, name='daq', daemon=True)
     t_daq.start()
     threading.Thread(target=eng.analysis_loop, name='analysis', daemon=True).start()
-    url = f'http://{"localhost" if args.bind in ("127.0.0.1", "0.0.0.0") else args.bind}:{args.port}'
     print(f'VibSpec: {url}  (WebDAQ {args.host}, job {args.job}). Ctrl+C to quit (stops the WebDAQ job).')
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()

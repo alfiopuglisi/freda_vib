@@ -67,6 +67,7 @@ class Peak:
     amp_dir: float
     linearity: float
     angle_from_vertical: float
+    amp_extra: float = float('nan')   # single-axis channel, same band, m/s²
 
 
 @dataclass
@@ -89,7 +90,10 @@ class SpectrumResult:
     peaks: List[Peak]
     params: Params
     t0: float = 0.0          # time of the first analysed sample (s since acquisition start)
-    raw: Optional[np.ndarray] = field(default=None, repr=False)  # (n, 3) m/s², kept for snapshots
+    raw: Optional[np.ndarray] = field(default=None, repr=False)  # (n, 3 or 4) m/s², kept for snapshots
+    ae: Optional[np.ndarray] = None    # single-axis channel amplitude spectrum, m/s²
+    psd_e: Optional[np.ndarray] = None
+    rms_e: float = float('nan')
 
 
 def _detrend(seg):
@@ -102,10 +106,11 @@ def _detrend(seg):
     return seg - mean - slope * t
 
 
-def analyze(xyz, fs, p0: Params, vertical=(0.0, 0.0, 1.0), t0=0.0) -> Optional[SpectrumResult]:
-    """xyz: array (n, 3) in m/s²."""
+def analyze(data, fs, p0: Params, vertical=(0.0, 0.0, 1.0), t0=0.0) -> Optional[SpectrumResult]:
+    """data: array (n, 3) = x, y, z in m/s², or (n, 4) with a single-axis channel in the last column."""
     p = p0.clamped()
-    xyz = np.asarray(xyz, dtype=float)
+    data = np.asarray(data, dtype=float)
+    xyz = data[:, :3]
     n = xyz.shape[0]
     if n < 8:
         return None
@@ -141,8 +146,19 @@ def analyze(xyz, fs, p0: Params, vertical=(0.0, 0.0, 1.0), t0=0.0) -> Optional[S
     up = up / np.linalg.norm(up)
     res = fs / seg_n
     peaks = _find_peaks(c, freq, var_k, k_min, k_max, res, df, up, p.n_peaks)
-    return SpectrumResult(fs, n, n / fs, seg_n, nfft, n_seg, res, freq, amp[0], amp[1], amp[2], atot,
-                          psd, up, rms, peaks, p, t0, xyz)
+    r = SpectrumResult(fs, n, n / fs, seg_n, nfft, n_seg, res, freq, amp[0], amp[1], amp[2], atot,
+                       psd, up, rms, peaks, p, t0, data)
+    if data.shape[1] > 3:   # single-axis channel: same segments and window, not part of the 3-D analysis
+        E = np.fft.rfft(_detrend(data[:, 3][idx]) * w, n=nfft, axis=-1)
+        ce = np.mean(np.abs(E) ** 2, axis=0)
+        r.ae = np.sqrt(ce) / sum_w * one
+        r.psd_e = ce / (fs * sum_w2) * one
+        r.rms_e = float(np.sqrt(np.sum(ce[k_min:k_max + 1] * var_k[k_min:k_max + 1]))) if k_max >= k_min else 0.0
+        for pk in peaks:
+            lo = max(1, int(round((pk.f - 2 * res) / df)))
+            hi = min(nb - 1, int(round((pk.f + 2 * res) / df)))
+            pk.amp_extra = math.sqrt(2 * float(np.sum(ce[lo:hi + 1] * var_k[lo:hi + 1])))
+    return r
 
 
 def _find_peaks(c, freq, var_k, k_min, k_max, res, df, up, n_peaks):
