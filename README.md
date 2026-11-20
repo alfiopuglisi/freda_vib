@@ -36,6 +36,8 @@ Needs Python 3.8+ with numpy, requests and matplotlib (Anaconda has them).
   amplitude at each peak; it is not used for the 3-D direction. The **bench_z** checkbox in Settings turns it
   off/on: unticked, channel 3 is removed from the WebDAQ job (the acquisition restarts, a few seconds are
   lost). The choice is remembered.
+- **Download raw data (CSV)**: the time samples (m/s², all channels) of the window the spectrum on screen
+  was computed from, also when held; same format as a snapshot's `_raw.csv`.
 - **Snapshots** (with a start delay, so you can walk away): saved in `snapshots/vib_YYYYMMDD_HHMMSS/` as
   `_plot.png`, `_summary.txt`, `_spectrum.csv`, `_raw.csv`, downloadable from the page (also as zip).
 
@@ -44,7 +46,7 @@ assumed along the sensor axis given by `--vertical`.
 
 HTTP API (all GET): `/api/status`, `/api/data`, `/api/start`, `/api/stop`, `/api/hold?on=1`,
 `/api/snapshot?delay=S`, `/api/cancel`, `/api/set?avg=&res=&fmin=&fmax=&unit=ACC|MG|VEL|DISP&log=1&peaks=&rate=&delay=&autostart=`,
-`/api/snapshots`, `/files/<snapshot>/<file>`, `/files/<snapshot>.zip`.
+`/api/snapshots`, `/api/raw.csv` (samples of the window on screen), `/files/<snapshot>/<file>`, `/files/<snapshot>.zip`.
 
 ## How it talks to the WebDAQ
 

@@ -362,6 +362,23 @@ class Engine:
             L += ['', 'No peak above the noise floor.']
         return '\n'.join(L) + '\n'
 
+    def raw_csv(self, r):
+        """The samples r was computed from: time from the first sample (s), acceleration (m/s²) per channel."""
+        bio = io.StringIO()
+        bio.write('t_s,ax_ms2,ay_ms2,az_ms2' + (f',{self.extra_name}_ms2' if r.raw.shape[1] > 3 else '') + '\n')
+        t = np.arange(len(r.raw)) / r.fs
+        np.savetxt(bio, np.column_stack([t, r.raw]), fmt=['%.6f'] + ['%.6g'] * r.raw.shape[1], delimiter=',')
+        return bio.getvalue()
+
+    def latest_raw(self):
+        """(filename, csv) of the samples behind the spectrum on screen, or None."""
+        with self.lock:
+            r, started = self.latest, self.run_started
+        if r is None or r.raw is None:
+            return None
+        t_start = datetime.fromtimestamp((started or time.time()) + r.t0)   # approximate wall time of sample 0
+        return f'vibspec_raw_{t_start:%Y%m%d_%H%M%S}.csv', self.raw_csv(r)
+
     def save_snapshot(self, r):
         name = 'vib_' + datetime.now().strftime('%Y%m%d_%H%M%S')
         d = os.path.join(self.snap_root, name)
@@ -379,9 +396,7 @@ class Engine:
             cols = np.column_stack([r.freq, *conv, r.ax, r.ay, r.az, r.atot, *r.psd, *extra])
             np.savetxt(f, cols, fmt='%.6g', delimiter=',')
         with open(os.path.join(d, name + '_raw.csv'), 'w', encoding='utf-8') as f:
-            f.write('t_s,ax_ms2,ay_ms2,az_ms2' + (f',{self.extra_name}_ms2' if r.raw.shape[1] > 3 else '') + '\n')
-            t = np.arange(len(r.raw)) / r.fs
-            np.savetxt(f, np.column_stack([t, r.raw]), fmt=['%.6f'] + ['%.6g'] * r.raw.shape[1], delimiter=',')
+            f.write(self.raw_csv(r))
         try:
             self._plot_png(r, os.path.join(d, name + '_plot.png'), name)
         except Exception as e:
@@ -525,6 +540,12 @@ def make_handler(eng: Engine):
                 if path == '/api/cancel': eng.cancel_snapshot(); return self._json(eng.status())
                 if path == '/api/set': eng.apply_settings(q); return self._json(eng.status())
                 if path == '/api/snapshots': return self._json(eng.snapshots())
+                if path == '/api/raw.csv':
+                    raw = eng.latest_raw()
+                    if raw is None:
+                        return self._send(404, 'text/plain', b'no data yet')
+                    return self._send(200, 'text/csv', raw[1].encode(),
+                                      {'Content-Disposition': f'attachment; filename="{raw[0]}"'})
                 if path.startswith('/files/'):
                     return self._file(path[len('/files/'):])
                 self._send(404, 'text/plain', b'not found')

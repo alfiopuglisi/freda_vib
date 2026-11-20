@@ -63,6 +63,7 @@
         <label id="extraBox" hidden title="Single-axis accelerometer: acquire it and show its line (changing it restarts the acquisition)"><input id="extra" type="checkbox" style="width:auto"> <span id="extraLabel">single-axis</span></label>
         <button id="apply" class="primary">Apply</button>
         <button id="savepng">Download this view (PNG)</button>
+        <button id="saveraw" title="Time samples (m/s²) of the window used for the spectrum on screen">Download raw data (CSV)</button>
       </div>
       <div class="muted" id="info"></div>
     </div>
@@ -252,7 +253,14 @@ $('hold').onclick = () => cmd('/api/hold?on=' + (st && st.hold ? 0 : 1));
 $('snap').onclick = () => cmd('/api/snapshot?delay=' + encodeURIComponent($('delay').value || 0));
 $('cancel').onclick = () => cmd('/api/cancel');
 $('delay').onchange = () => cmd('/api/set?delay=' + encodeURIComponent($('delay').value || 0));
-$('extra').onchange = async () => { await cmd('/api/set?extra=' + ($('extra').checked ? 1 : 0)); seq = -1; };
+$('saveraw').onclick = async () => {
+  const r = await fetch('/api/raw.csv', { cache: 'no-store' });
+  if (!r.ok) { alert('No data yet.'); return; }
+  const name = (/filename="([^"]+)"/.exec(r.headers.get('Content-Disposition') || '') || [, 'vibspec_raw.csv'])[1];
+  const a = document.createElement('a'); a.download = name; a.href = URL.createObjectURL(await r.blob()); a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+};
+$('extra').onchange =async () => { await cmd('/api/set?extra=' + ($('extra').checked ? 1 : 0)); seq = -1; };
 $('apply').onclick = async () => {
   const q = ['avg', 'res', 'fmin', 'fmax', 'unit', 'log', 'peaks', 'rate'].map(k => k + '=' + encodeURIComponent($(k).value)).join('&');
   await cmd('/api/set?' + q); formLoaded = false; seq = -1;
