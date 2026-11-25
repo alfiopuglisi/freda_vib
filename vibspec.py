@@ -24,6 +24,7 @@ import numpy as np
 import requests
 
 import analyzer as A
+from recorder import Recorder
 from webdaq import RUNNING_CODES, WebDAQ
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -53,8 +54,14 @@ class Engine:
         self.rate = 2560
         self.snapshot_delay = 5.0
         self.autostart = True
+        self.record = False           # save raw samples and spectra to CSV files
+        self.rec = Recorder(args.datadir, args.min_free_gb)
+        self.run_no = 0               # increments at every device run (sample indices restart from 0)
+        self.rec_next = (0, 0)        # (run_no, sample index) where the next recorded spectrum window starts
         self._load_settings()
         self._set_channels()
+        if self.record and not self.rec.set_on(True):
+            self.record = False
         # state
         self.want_run = self.autostart
         self.acquiring = False
@@ -89,6 +96,10 @@ class Engine:
         self.cols = [nums.index(c) for c, _, _ in spec]
         self.ncols = len(spec)
 
+    def col_names(self):
+        """Names of the data columns in the CSV files: ax, ay, az (+ the single-axis channel)."""
+        return ['ax', 'ay', 'az'] + ([self.extra_name] if self.ncols > 3 else [])
+
     # ---------- settings ----------
     def _load_settings(self):
         try:
@@ -99,6 +110,7 @@ class Engine:
             self.snapshot_delay = float(s.get('delay', self.snapshot_delay))
             self.autostart = bool(s.get('autostart', self.autostart))
             self.extra_on = bool(s.get('extra', self.extra_on))
+            self.record = bool(s.get('record', self.record))
         except FileNotFoundError:
             pass
         except Exception as e:
@@ -108,7 +120,8 @@ class Engine:
         try:
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump({'params': dataclasses.asdict(self.params), 'rate': self.rate,
-                           'delay': self.snapshot_delay, 'autostart': self.autostart, 'extra': self.extra_on},
+                           'delay': self.snapshot_delay, 'autostart': self.autostart, 'extra': self.extra_on,
+                           'record': self.record},
                           f, indent=1)
         except Exception as e:
             print('cannot save settings:', e)
@@ -137,6 +150,11 @@ class Engine:
                 else:
                     self._set_channels()
                     self.buf = np.zeros((0, self.ncols))
+            if 'record' in q:
+                on = q['record'] in ('1', 'true')
+                if on and not self.rec.on:
+                    self.rec_next = (self.run_no, self.buf_start + len(self.buf))   # start from new data
+                self.record = self.rec.set_on(on) and on
             self._save_settings()
             self.seq += 1  # force the page to re-read even when held
 
@@ -235,6 +253,8 @@ class Engine:
             self.restart_req = False
             self.run_started = time.time()
             self.run_iter = None
+            self.run_no += 1
+            self.rec_next = (self.run_no, 0)
             pending = None if self.snap_target is None else max(0, self.snap_target - (self.buf_start + len(self.buf)))
             self.buf = np.zeros((0, self.ncols))
             self.buf_start = 0
@@ -285,6 +305,7 @@ class Engine:
             if len(a) == 0:
                 break
             xyz = a[:, self.cols] * A.G0  # g -> m/s²
+            self.rec.write_raw(self.run_started + self.fetched / self.rate, self.rate, xyz, self.col_names())
             with self.lock:
                 self.buf = np.vstack([self.buf, xyz])
                 self.fetched += len(a)
@@ -306,9 +327,12 @@ class Engine:
         with self.lock:
             p, buf, start, fs = self.params, self.buf, self.buf_start, float(self.rate)
             target = self.snap_target
+            run_no, run_started, (rec_run, rec_next) = self.run_no, self.run_started, self.rec_next
         if len(buf) < 16:
             return
         end = start + len(buf)
+        if self.rec.on and self.acquiring:
+            self._record_spectra(buf, start, fs, p, run_no, run_started, rec_next if rec_run == run_no else 0)
         if target is not None:
             n_win = int(round(p.avg_s * fs))
             if target < start:   # window start no longer in memory (e.g. restart): take the oldest data
@@ -334,6 +358,23 @@ class Engine:
             with self.lock:
                 self.latest = r
                 self.seq += 1
+
+    def _record_spectra(self, buf, start, fs, p, run_no, run_started, nxt):
+        """Spectra of consecutive, non-overlapping windows of avg_s seconds, so the whole recording is covered."""
+        n_win = int(round(p.avg_s * fs))
+        end = start + len(buf)
+        nxt = max(nxt, start)
+        while nxt + n_win <= end:
+            r = A.analyze(buf[nxt - start:nxt - start + n_win], fs, p, self.vertical, t0=nxt / fs)
+            if r is not None:
+                ks = np.nonzero((r.freq > 0) & (r.freq >= p.fmin) & (r.freq <= min(p.fmax, fs / 2)))[0]
+                amps = [r.ax[ks], r.ay[ks], r.az[ks], r.atot[ks]] + ([r.ae[ks]] if r.ae is not None else [])
+                names = ['x', 'y', 'z', 'total'] + ([self.extra_name] if r.ae is not None else [])
+                self.rec.write_spectrum(run_started + nxt / fs, n_win / fs, r.freq[ks], amps, names)
+            nxt += n_win
+        with self.lock:
+            if self.run_no == run_no:
+                self.rec_next = (run_no, nxt)
 
     # ---------- snapshots ----------
     def summary(self, r, title):
@@ -468,6 +509,9 @@ class Engine:
                 'rates': RATES, 'sensor': self.device, 'message': self.message,
                 'freeMB': None if self.free_bytes is None else round(self.free_bytes / 1e6),
                 'snapshotIn': snap_in, 'lastSnapshot': self.last_snapshot, 'snapDir': self.snap_root,
+                'record': self.rec.on, 'recDir': self.rec.root, 'recMB': round(self.rec.bytes / 1e6),
+                'recFreeGB': None if self.rec.free is None else round(self.rec.free / 1e9),
+                'recError': self.rec.error,
                 'delay': self.snapshot_delay, 'autostart': self.autostart, 'vertical': self.args.vertical,
                 'params': {'avg': p.avg_s, 'res': p.res_hz, 'fmin': p.fmin, 'fmax': p.fmax, 'unit': p.unit,
                            'unitLabel': A.UNITS[p.unit][0], 'log': p.log_y, 'peaks': p.n_peaks},
@@ -595,6 +639,9 @@ def main():
     ap.add_argument('--snapshots', default=os.path.join(HERE, 'snapshots'), help='snapshot folder')
     ap.add_argument('--rotate-min', type=float, default=10, help='restart the WebDAQ job every N minutes to delete its log')
     ap.add_argument('--min-free-mb', type=float, default=40, help='restart earlier if the WebDAQ storage drops below this')
+    ap.add_argument('--datadir', default=r'D:\freda_vib_data' if os.path.isdir('D:\\') else os.path.join(HERE, 'data'),
+                    help='folder of the recorded CSV files ("Save data" checkbox)')
+    ap.add_argument('--min-free-gb', type=float, default=20, help='stop recording below this free space on the data disk')
     ap.add_argument('--buffer-s', type=float, default=15, help='seconds of samples kept in memory')
     ap.add_argument('--no-browser', action='store_true')
     args = ap.parse_args()
@@ -668,6 +715,7 @@ def main():
         eng.want_run = False
         eng.stop_evt.set()
         t_daq.join(timeout=15)
+        eng.rec.close()
         srv.server_close()
 
 
